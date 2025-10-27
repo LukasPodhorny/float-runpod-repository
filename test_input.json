@@ -1,0 +1,10 @@
+{
+    "input": {
+        "face_url": "https://files.catbox.moe/ii9hze.png",
+        "audio_url": "https://files.catbox.moe/jh3eev.wav",
+        "emotion": "happy",
+        "seed": 15,
+        "a_cfg_scale": 2,
+        "e_cfg_scale": 1
+    }
+}
