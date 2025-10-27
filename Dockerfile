@@ -26,6 +26,13 @@ RUN sh environments.sh
 # Copy your app
 COPY . .
 
+RUN sh download_checkpoints.sh
+
+RUN apt-get update && apt-get install -y git git-lfs && git lfs install && \
+    git clone https://huggingface.co/facebook/wav2vec2-base-960h /workspace/checkpoints/wav2vec2-base-960h && \
+    git clone https://huggingface.co/r-f/wav2vec-english-speech-emotion-recognition /workspace/checkpoints/wav2vec-english-speech-emotion-recognition
+
+
 # Install runpod deps last
 RUN pip install runpod boto3 requests
 
