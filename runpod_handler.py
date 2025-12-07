@@ -115,182 +115,193 @@ def verify_model_loaded():
 # ---------- RUNPOD HANDLER ----------
 def handler(event):
     workdir = None
-    upload_futures = []
 
     try:
         # Verify model is ready
         ckpt_path = verify_model_loaded()
 
         inp = event.get("input", {})
-        items = inp.get("items", [])
+        avatars_config = inp.get("avatars", {})
+        dialogues = inp.get("dialogues", [])
 
-        if not items:
-            return {"error": "No items provided in input"}
+        if not avatars_config:
+            return {"error": "No avatars provided in input"}
+
+        if not dialogues:
+            return {"error": "No dialogues provided in input"}
 
         workdir = tempfile.mkdtemp(prefix="float_job_")
         print(f"[job] workdir: {workdir}", flush=True)
 
-        results = {"items": []}
-
-        # Process each item (avatar image + audio URLs)
-        for item_idx, item in enumerate(items):
-            avatar_image_url = item.get("avatar_image")
-            audio_urls = item.get("audio_urls", [])
-            emotion = item.get("emotion", "neutral")
-            seed = item.get("seed", 0)
-            a_cfg_scale = item.get("a_cfg_scale", 2)
-            e_cfg_scale = item.get("e_cfg_scale", 1)
-
+        # Download and cache all avatar images
+        avatar_paths = {}
+        for avatar_name, avatar_config in avatars_config.items():
+            avatar_image_url = avatar_config.get("avatar_image")
             if not avatar_image_url:
-                results["items"].append(
-                    {"error": "Missing avatar_image", "video_urls": []}
-                )
-                continue
+                raise ValueError(f"Missing avatar_image for avatar: {avatar_name}")
 
-            if not audio_urls:
-                results["items"].append(
-                    {"error": "No audio_urls provided", "video_urls": []}
-                )
-                continue
-
-            print(
-                f"[job] processing item {item_idx}: {len(audio_urls)} videos",
-                flush=True,
-            )
-
-            # Download avatar image ONCE per item
-            # Check if it's a local path (from network volume) or URL
+            # Check if it's a local path or URL
             if avatar_image_url.startswith("http://") or avatar_image_url.startswith(
                 "https://"
             ):
                 face_path = download_file(avatar_image_url, workdir)
             else:
-                # It's a local path, use directly
                 face_path = avatar_image_url
                 print(f"[job] using local avatar image: {face_path}", flush=True)
 
-            video_urls = []
-            item_upload_futures = []
+            avatar_paths[avatar_name] = {
+                "face_path": face_path,
+                "seed": avatar_config.get("seed", 0),
+                "a_cfg_scale": avatar_config.get("a_cfg_scale", 2),
+                "e_cfg_scale": avatar_config.get("e_cfg_scale", 1),
+            }
 
-            # Process each audio for this avatar
-            for audio_idx, audio_url in enumerate(audio_urls):
-                try:
+        print(f"[job] loaded {len(avatar_paths)} avatars", flush=True)
+
+        # Process all dialogues in order
+        results = []
+        upload_futures = []
+
+        for dialogue_idx, dialogue in enumerate(dialogues):
+            try:
+                avatar_name = dialogue.get("avatar")
+                audio_url = dialogue.get("audio_url")
+                emotion = dialogue.get("emotion", "neutral")
+                dialogue_id = dialogue.get("id", dialogue_idx)
+
+                if not avatar_name or not audio_url:
                     print(
-                        f"[job] processing audio {audio_idx}: {audio_url[:80]}...",
+                        f"[job] dialogue {dialogue_idx}: missing avatar or audio_url",
                         flush=True,
                     )
+                    results.append({"id": dialogue_id, "video_url": None})
+                    upload_futures.append(None)
+                    continue
 
-                    # Download audio
-                    # Check if it's a local path or URL
-                    if audio_url.startswith("http://") or audio_url.startswith(
-                        "https://"
-                    ):
-                        audio_path = download_file(audio_url, workdir)
-                    else:
-                        audio_path = audio_url
-                        print(f"[job] using local audio: {audio_path}", flush=True)
-
-                    # Output filename
-                    output_filename = (
-                        f"output_{item_idx}_{audio_idx}_{uuid.uuid4().hex[:8]}.mp4"
-                    )
-                    final_output = os.path.join(workdir, output_filename)
-
+                if avatar_name not in avatar_paths:
                     print(
-                        f"[inference] starting FLOAT generation for audio {audio_idx}...",
+                        f"[job] dialogue {dialogue_idx}: unknown avatar '{avatar_name}'",
                         flush=True,
                     )
+                    results.append({"id": dialogue_id, "video_url": None})
+                    upload_futures.append(None)
+                    continue
 
-                    # Run FLOAT inference
-                    inference_cmd = [
-                        sys.executable,
-                        "generate.py",
-                        "--ref_path",
-                        face_path,
-                        "--aud_path",
-                        audio_path,
-                        "--emo",
-                        str(emotion),
-                        "--seed",
-                        str(seed),
-                        "--a_cfg_scale",
-                        str(a_cfg_scale),
-                        "--e_cfg_scale",
-                        str(e_cfg_scale),
-                        "--ckpt_path",
-                        ckpt_path,
-                        "--res_dir",
-                        workdir,
-                        "--res_video_path",
-                        final_output,
-                    ]
+                print(
+                    f"[job] dialogue {dialogue_idx} ({avatar_name}, {emotion}): {audio_url[:80]}...",
+                    flush=True,
+                )
 
-                    env = dict(os.environ, CUDA_VISIBLE_DEVICES="0")
-                    result = subprocess.run(
-                        inference_cmd,
-                        env=env,
-                        capture_output=True,
-                        text=True,
-                        timeout=300,  # 5 minute timeout per video
+                avatar_info = avatar_paths[avatar_name]
+
+                # Download audio
+                if audio_url.startswith("http://") or audio_url.startswith("https://"):
+                    audio_path = download_file(audio_url, workdir)
+                else:
+                    audio_path = audio_url
+                    print(f"[job] using local audio: {audio_path}", flush=True)
+
+                # Output filename
+                output_filename = f"output_{dialogue_idx}_{uuid.uuid4().hex[:8]}.mp4"
+                final_output = os.path.join(workdir, output_filename)
+
+                print(
+                    f"[inference] starting FLOAT generation for dialogue {dialogue_idx}...",
+                    flush=True,
+                )
+
+                # Run FLOAT inference
+                inference_cmd = [
+                    sys.executable,
+                    "generate.py",
+                    "--ref_path",
+                    avatar_info["face_path"],
+                    "--aud_path",
+                    audio_path,
+                    "--emo",
+                    str(emotion),
+                    "--seed",
+                    str(avatar_info["seed"]),
+                    "--a_cfg_scale",
+                    str(avatar_info["a_cfg_scale"]),
+                    "--e_cfg_scale",
+                    str(avatar_info["e_cfg_scale"]),
+                    "--ckpt_path",
+                    ckpt_path,
+                    "--res_dir",
+                    workdir,
+                    "--res_video_path",
+                    final_output,
+                ]
+
+                env = dict(os.environ, CUDA_VISIBLE_DEVICES="0")
+                result = subprocess.run(
+                    inference_cmd,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    timeout=300,  # 5 minute timeout per video
+                )
+
+                print(f"[generate.py stdout] {result.stdout}", flush=True)
+                if result.stderr:
+                    print(f"[generate.py stderr] {result.stderr}", flush=True)
+
+                result.check_returncode()
+
+                # Verify output exists
+                if not os.path.exists(final_output):
+                    # Fallback: look for any mp4 in workdir
+                    outputs = glob.glob(
+                        os.path.join(workdir, "**", "*.mp4"), recursive=True
                     )
-
-                    print(f"[generate.py stdout] {result.stdout}", flush=True)
-                    if result.stderr:
-                        print(f"[generate.py stderr] {result.stderr}", flush=True)
-
-                    result.check_returncode()
-
-                    # Verify output exists
-                    if not os.path.exists(final_output):
-                        # Fallback: look for any mp4 in workdir
-                        outputs = glob.glob(
-                            os.path.join(workdir, "**", "*.mp4"), recursive=True
+                    if not outputs:
+                        print(
+                            f"[job] no output found for dialogue {dialogue_idx}",
+                            flush=True,
                         )
-                        if not outputs:
-                            print(
-                                f"[job] no output found for audio {audio_idx}",
-                                flush=True,
-                            )
-                            video_urls.append(None)
-                            item_upload_futures.append(None)
-                            continue
-                        final_output = max(outputs, key=os.path.getmtime)
+                        results.append({"id": dialogue_id, "video_url": None})
+                        upload_futures.append(None)
+                        continue
+                    final_output = max(outputs, key=os.path.getmtime)
 
-                    print(f"[job] generated: {final_output}", flush=True)
+                print(f"[job] generated: {final_output}", flush=True)
 
-                    # Upload to R2 in parallel (non-blocking)
-                    object_name = f"float_outputs/{uuid.uuid4()}.mp4"
-                    upload_future = _executor.submit(
-                        upload_to_r2, final_output, object_name
-                    )
-                    item_upload_futures.append(upload_future)
-                    video_urls.append("pending")  # Placeholder
+                # Upload to R2 in parallel
+                object_name = f"float_outputs/{uuid.uuid4()}.mp4"
+                upload_future = _executor.submit(
+                    upload_to_r2, final_output, object_name
+                )
+                upload_futures.append(upload_future)
+                results.append({"id": dialogue_id, "video_url": "pending"})
 
-                except subprocess.TimeoutExpired:
-                    print(f"[job] audio {audio_idx} timed out", flush=True)
-                    video_urls.append(None)
-                    item_upload_futures.append(None)
+            except subprocess.TimeoutExpired:
+                print(f"[job] dialogue {dialogue_idx} timed out", flush=True)
+                results.append(
+                    {"id": dialogue.get("id", dialogue_idx), "video_url": None}
+                )
+                upload_futures.append(None)
+            except Exception as e:
+                print(f"[job] dialogue {dialogue_idx} failed: {e}", flush=True)
+                traceback.print_exc()
+                results.append(
+                    {"id": dialogue.get("id", dialogue_idx), "video_url": None}
+                )
+                upload_futures.append(None)
+
+        # Wait for all uploads to complete
+        print(
+            f"[job] waiting for {len(upload_futures)} uploads to complete...",
+            flush=True,
+        )
+        for idx, future in enumerate(upload_futures):
+            if future is not None:
+                try:
+                    presigned_url = future.result(timeout=60)
+                    results[idx]["video_url"] = presigned_url
                 except Exception as e:
-                    print(f"[job] audio {audio_idx} failed: {e}", flush=True)
-                    traceback.print_exc()
-                    video_urls.append(None)
-                    item_upload_futures.append(None)
-
-            # Wait for all uploads for this item to complete
-            print(
-                f"[job] waiting for {len(item_upload_futures)} uploads to complete...",
-                flush=True,
-            )
-            for idx, future in enumerate(item_upload_futures):
-                if future is not None:
-                    try:
-                        presigned_url = future.result(timeout=60)
-                        video_urls[idx] = presigned_url
-                    except Exception as e:
-                        print(f"[upload] failed for audio {idx}: {e}", flush=True)
-                        video_urls[idx] = None
-
-            results["items"].append({"video_urls": video_urls})
+                    print(f"[upload] failed for dialogue {idx}: {e}", flush=True)
+                    results[idx]["video_url"] = None
 
         return results
 
