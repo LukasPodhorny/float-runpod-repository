@@ -163,15 +163,17 @@ def handler(event):
         upload_futures = []
 
         for dialogue_idx, dialogue in enumerate(dialogues):
+            # Get custom ID or use index as fallback
+            dialogue_id = dialogue.get("id", dialogue_idx)
+
             try:
                 avatar_name = dialogue.get("avatar")
                 audio_url = dialogue.get("audio_url")
                 emotion = dialogue.get("emotion", "neutral")
-                dialogue_id = dialogue.get("id", dialogue_idx)
 
                 if not avatar_name or not audio_url:
                     print(
-                        f"[job] dialogue {dialogue_idx}: missing avatar or audio_url",
+                        f"[job] dialogue {dialogue_idx} (id={dialogue_id}): missing avatar or audio_url",
                         flush=True,
                     )
                     results.append({"id": dialogue_id, "video_url": None})
@@ -180,7 +182,7 @@ def handler(event):
 
                 if avatar_name not in avatar_paths:
                     print(
-                        f"[job] dialogue {dialogue_idx}: unknown avatar '{avatar_name}'",
+                        f"[job] dialogue {dialogue_idx} (id={dialogue_id}): unknown avatar '{avatar_name}'",
                         flush=True,
                     )
                     results.append({"id": dialogue_id, "video_url": None})
@@ -188,7 +190,7 @@ def handler(event):
                     continue
 
                 print(
-                    f"[job] dialogue {dialogue_idx} ({avatar_name}, {emotion}): {audio_url[:80]}...",
+                    f"[job] dialogue {dialogue_idx} (id={dialogue_id}, avatar={avatar_name}, emotion={emotion}): {audio_url[:80]}...",
                     flush=True,
                 )
 
@@ -206,7 +208,7 @@ def handler(event):
                 final_output = os.path.join(workdir, output_filename)
 
                 print(
-                    f"[inference] starting FLOAT generation for dialogue {dialogue_idx}...",
+                    f"[inference] starting FLOAT generation for dialogue {dialogue_idx} (id={dialogue_id})...",
                     flush=True,
                 )
 
@@ -257,7 +259,7 @@ def handler(event):
                     )
                     if not outputs:
                         print(
-                            f"[job] no output found for dialogue {dialogue_idx}",
+                            f"[job] no output found for dialogue {dialogue_idx} (id={dialogue_id})",
                             flush=True,
                         )
                         results.append({"id": dialogue_id, "video_url": None})
@@ -276,17 +278,19 @@ def handler(event):
                 results.append({"id": dialogue_id, "video_url": "pending"})
 
             except subprocess.TimeoutExpired:
-                print(f"[job] dialogue {dialogue_idx} timed out", flush=True)
-                results.append(
-                    {"id": dialogue.get("id", dialogue_idx), "video_url": None}
+                print(
+                    f"[job] dialogue {dialogue_idx} (id={dialogue_id}) timed out",
+                    flush=True,
                 )
+                results.append({"id": dialogue_id, "video_url": None})
                 upload_futures.append(None)
             except Exception as e:
-                print(f"[job] dialogue {dialogue_idx} failed: {e}", flush=True)
-                traceback.print_exc()
-                results.append(
-                    {"id": dialogue.get("id", dialogue_idx), "video_url": None}
+                print(
+                    f"[job] dialogue {dialogue_idx} (id={dialogue_id}) failed: {e}",
+                    flush=True,
                 )
+                traceback.print_exc()
+                results.append({"id": dialogue_id, "video_url": None})
                 upload_futures.append(None)
 
         # Wait for all uploads to complete
